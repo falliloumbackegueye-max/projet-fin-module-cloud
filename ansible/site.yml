@@ -1,0 +1,301 @@
+---
+# ============================================================
+# Playbook Principal — Architecture 3-Tiers
+# ============================================================
+
+# ── 1. Gateway / Firewall ────────────────────────────────────
+- name: Configure Gateway (Routing + iptables)
+  hosts: gateway
+  become: true
+  vars:
+    dmz_iface: enp0s8
+    lan_iface: enp0s9
+    wan_iface: enp0s3
+  tasks:
+
+    - name: Activer le forwarding IPv4 (sysctl)
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        sysctl_set: true
+        state: present
+        reload: true
+
+    - name: Persister ip_forward dans /etc/sysctl.conf
+      lineinfile:
+        path: /etc/sysctl.conf
+        regexp: "^#?net.ipv4.ip_forward"
+        line: "net.ipv4.ip_forward=1"
+
+    - name: Installer iptables-persistent
+      apt:
+        name: iptables-persistent
+        state: present
+        update_cache: true
+
+    - name: Règle NAT — masquerade sortie WAN
+      ansible.builtin.iptables:
+        table: nat
+        chain: POSTROUTING
+        out_interface: "{{ wan_iface }}"
+        jump: MASQUERADE
+
+    - name: Autoriser forward DMZ → WAN
+      ansible.builtin.iptables:
+        chain: FORWARD
+        in_interface: "{{ dmz_iface }}"
+        out_interface: "{{ wan_iface }}"
+        ctstate: NEW,ESTABLISHED,RELATED
+        jump: ACCEPT
+
+    - name: Autoriser forward LAN → WAN
+      ansible.builtin.iptables:
+        chain: FORWARD
+        in_interface: "{{ lan_iface }}"
+        out_interface: "{{ wan_iface }}"
+        ctstate: NEW,ESTABLISHED,RELATED
+        jump: ACCEPT
+
+    - name: Autoriser retour WAN → DMZ/LAN
+      ansible.builtin.iptables:
+        chain: FORWARD
+        in_interface: "{{ wan_iface }}"
+        ctstate: ESTABLISHED,RELATED
+        jump: ACCEPT
+
+    - name: Autoriser DMZ → LAN (port 3306 MySQL uniquement)
+      ansible.builtin.iptables:
+        chain: FORWARD
+        in_interface: "{{ dmz_iface }}"
+        out_interface: "{{ lan_iface }}"
+        destination_port: "3306"
+        protocol: tcp
+        ctstate: NEW,ESTABLISHED,RELATED
+        jump: ACCEPT
+
+    - name: Bloquer tout autre trafic LAN → DMZ
+      ansible.builtin.iptables:
+        chain: FORWARD
+        in_interface: "{{ lan_iface }}"
+        out_interface: "{{ dmz_iface }}"
+        jump: DROP
+
+    - name: Sauvegarder les règles iptables
+      community.general.iptables_state:
+        state: saved
+        path: /etc/iptables/rules.v4
+
+# ── 2. Serveur Web (DMZ) ─────────────────────────────────────
+- name: Configure Web Server (Nginx + Node.js)
+  hosts: webservers
+  become: true
+  vars:
+    app_dir: /opt/app
+    app_repo: "{{ lookup('env', 'APP_REPO') | default('https://github.com/votre-org/votre-app.git', true) }}"
+    app_port: 3000
+    db_host: "192.168.10.10"
+    db_name: appdb
+    db_user: appuser
+    db_password: "{{ lookup('env', 'DB_PASSWORD') | default('ChangeMe123!', true) }}"
+  tasks:
+
+    - name: Installer Nginx
+      apt:
+        name: nginx
+        state: present
+        update_cache: true
+
+    - name: Installer curl (pour NodeSource)
+      apt:
+        name: curl
+        state: present
+
+    - name: Ajouter le dépôt NodeSource (Node 20)
+      shell: |
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+      args:
+        creates: /etc/apt/sources.list.d/nodesource.list
+
+    - name: Installer Node.js et git
+      apt:
+        name:
+          - nodejs
+          - git
+        state: present
+        update_cache: true
+
+    - name: Créer le répertoire de l'application
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: "0755"
+
+    - name: Cloner / mettre à jour le dépôt applicatif
+      git:
+        repo: "{{ app_repo }}"
+        dest: "{{ app_dir }}"
+        version: main
+        force: true
+
+    - name: Installer les dépendances npm
+      community.general.npm:
+        path: "{{ app_dir }}"
+        state: present
+
+    - name: Créer le fichier .env de l'application
+      copy:
+        dest: "{{ app_dir }}/.env"
+        content: |
+          PORT={{ app_port }}
+          DB_HOST={{ db_host }}
+          DB_NAME={{ db_name }}
+          DB_USER={{ db_user }}
+          DB_PASSWORD={{ db_password }}
+        mode: "0600"
+        owner: www-data
+
+    - name: Installer pm2 globalement
+      community.general.npm:
+        name: pm2
+        global: true
+        state: present
+
+    - name: Démarrer l'application avec pm2
+      become_user: www-data
+      shell: |
+        pm2 describe app > /dev/null 2>&1 && pm2 restart app || pm2 start {{ app_dir }}/index.js --name app
+      args:
+        chdir: "{{ app_dir }}"
+
+    - name: Configurer Nginx en reverse proxy
+      copy:
+        dest: /etc/nginx/sites-available/app
+        content: |
+          server {
+              listen 80;
+              server_name _;
+
+              location / {
+                  proxy_pass         http://127.0.0.1:{{ app_port }};
+                  proxy_http_version 1.1;
+                  proxy_set_header   Upgrade $http_upgrade;
+                  proxy_set_header   Connection 'upgrade';
+                  proxy_set_header   Host $host;
+                  proxy_cache_bypass $http_upgrade;
+                  proxy_set_header   X-Real-IP $remote_addr;
+                  proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+              }
+          }
+        mode: "0644"
+
+    - name: Activer le site Nginx
+      file:
+        src: /etc/nginx/sites-available/app
+        dest: /etc/nginx/sites-enabled/app
+        state: link
+
+    - name: Désactiver le site default de Nginx
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Redémarrer et activer Nginx
+      systemd:
+        name: nginx
+        state: restarted
+        enabled: true
+
+    - name: Ouvrir le port 80 (ufw)
+      community.general.ufw:
+        rule: allow
+        port: "80"
+        proto: tcp
+
+# ── 3. Serveur Base de Données (LAN) ─────────────────────────
+- name: Configure Database Server (MySQL)
+  hosts: dbservers
+  become: true
+  vars:
+    db_name: appdb
+    db_user: appuser
+    db_password: "{{ lookup('env', 'DB_PASSWORD') | default('ChangeMe123!', true) }}"
+    webserver_ip: "192.168.100.10"
+  tasks:
+
+    - name: Installer MySQL et PyMySQL
+      apt:
+        name:
+          - mysql-server
+          - python3-pymysql
+        state: present
+        update_cache: true
+
+    - name: Démarrer et activer MySQL
+      systemd:
+        name: mysql
+        state: started
+        enabled: true
+
+    - name: Configurer MySQL pour écouter sur le LAN
+      lineinfile:
+        path: /etc/mysql/mysql.conf.d/mysqld.cnf
+        regexp: "^bind-address"
+        line: "bind-address = 192.168.10.10"
+      notify: Restart MySQL
+
+    - name: Créer la base de données applicative
+      community.mysql.mysql_db:
+        name: "{{ db_name }}"
+        state: present
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Créer l'utilisateur applicatif (accès restreint au Web)
+      community.mysql.mysql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        host: "{{ webserver_ip }}"
+        priv: "{{ db_name }}.*:ALL"
+        state: present
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Supprimer les utilisateurs anonymes
+      community.mysql.mysql_user:
+        name: ""
+        host_all: true
+        state: absent
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Désactiver le login root distant
+      community.mysql.mysql_user:
+        name: root
+        host: "{{ item }}"
+        state: absent
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+      loop:
+        - "{{ ansible_hostname }}"
+        - "127.0.0.1"
+        - "::1"
+        - "%"
+
+    - name: Bloquer tout accès externe sauf port 3306 depuis la DMZ
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "3306"
+        source: "192.168.100.0/24"
+        jump: ACCEPT
+
+    - name: Bloquer port 3306 depuis toute autre source
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "3306"
+        jump: DROP
+
+  handlers:
+    - name: Restart MySQL
+      systemd:
+        name: mysql
+        state: restarted

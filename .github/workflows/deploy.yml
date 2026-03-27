@@ -1,0 +1,114 @@
+name: CI/CD — Architecture 3-Tiers
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+# ────────────────────────────────────────────────────────────
+# Environnement global
+# ────────────────────────────────────────────────────────────
+env:
+  ANSIBLE_HOST_KEY_CHECKING: "False"
+  ANSIBLE_FORCE_COLOR: "1"
+
+jobs:
+
+  # ──────────────────────────────────────────────────────────
+  # JOB 1 : LINT — Vérification syntaxique YAML
+  # ──────────────────────────────────────────────────────────
+  lint:
+    name: "🔍 Lint YAML (Ansible + Vagrant)"
+    runs-on: self-hosted          # Runner auto-hébergé sur la machine hôte
+    steps:
+
+      - name: Checkout du dépôt
+        uses: actions/checkout@v4
+
+      - name: Installer yamllint
+        run: pip3 install yamllint --quiet
+
+      - name: Lint — Vagrantfile (syntax Ruby/YAML embedded)
+        run: |
+          echo "=== Vérification syntaxique Vagrantfile ==="
+          ruby -c Vagrantfile
+
+      - name: Lint — Playbook Ansible site.yml
+        run: |
+          echo "=== yamllint ansible/ ==="
+          yamllint -d '{extends: relaxed, rules: {line-length: {max: 120}}}' \
+            ansible/site.yml \
+            ansible/inventory.ini \
+            .github/workflows/deploy.yml
+
+      - name: Lint — ansible-lint
+        run: |
+          pip3 install ansible ansible-lint --quiet
+          cd ansible
+          ansible-lint site.yml --profile=production || true
+
+  # ──────────────────────────────────────────────────────────
+  # JOB 2 : DEPLOY — Déploiement via Ansible
+  # ──────────────────────────────────────────────────────────
+  deploy:
+    name: "🚀 Deploy (Ansible Playbook)"
+    runs-on: self-hosted
+    needs: lint                   # Déploiement uniquement si le lint passe
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+
+      - name: Checkout du dépôt
+        uses: actions/checkout@v4
+
+      - name: Vérifier que les VMs Vagrant sont actives
+        run: |
+          echo "=== État des VMs ==="
+          vagrant status
+        working-directory: ${{ github.workspace }}
+
+      - name: Installer Ansible et collections requises
+        run: |
+          pip3 install ansible --quiet
+          ansible-galaxy collection install \
+            ansible.posix \
+            community.general \
+            community.mysql \
+            --force-with-deps
+
+      - name: Test de connectivité SSH (ping Ansible)
+        run: |
+          ansible all -i ansible/inventory.ini -m ping
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+
+      - name: Exécuter le Playbook complet
+        run: |
+          ansible-playbook \
+            -i ansible/inventory.ini \
+            ansible/site.yml \
+            --diff \
+            -v
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          APP_REPO:    ${{ secrets.APP_REPO }}
+
+      - name: Vérification post-déploiement — Nginx répond
+        run: |
+          echo "=== Test HTTP sur le serveur Web ==="
+          curl --fail --silent --max-time 10 http://192.168.100.10 \
+            && echo "✅ Nginx OK" \
+            || echo "⚠️  Nginx injoignable depuis le runner"
+
+      - name: Résumé du déploiement
+        if: always()
+        run: |
+          echo "────────────────────────────────────"
+          echo "  Déploiement terminé : $(date)"
+          echo "  Commit : ${{ github.sha }}"
+          echo "  Auteur : ${{ github.actor }}"
+          echo "────────────────────────────────────"
