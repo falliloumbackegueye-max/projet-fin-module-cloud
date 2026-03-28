@@ -3,23 +3,19 @@ name: CI/CD — Architecture 3-Tiers
 on:
   push:
     branches:
+      - main
       - master
   pull_request:
     branches:
+      - main
       - master
 
-# ────────────────────────────────────────────────────────────
-# Environnement global
-# ────────────────────────────────────────────────────────────
 env:
   ANSIBLE_HOST_KEY_CHECKING: "False"
   ANSIBLE_FORCE_COLOR: "1"
 
 jobs:
 
-  # ──────────────────────────────────────────────────────────
-  # JOB 1 : LINT — Vérification syntaxique YAML
-  # ──────────────────────────────────────────────────────────
   lint:
     name: "🔍 Lint YAML (Ansible)"
     runs-on: self-hosted
@@ -33,10 +29,9 @@ jobs:
 
       - name: Lint — Playbook Ansible site.yml
         run: |
-          echo "=== yamllint ansible/ ==="
+          echo "=== yamllint ansible/site.yml ==="
           yamllint -d '{extends: relaxed, rules: {line-length: {max: 120}}}' \
             ansible/site.yml \
-            ansible/inventory.ini \
             .github/workflows/deploy.yml
 
       - name: Lint — ansible-lint
@@ -45,14 +40,13 @@ jobs:
           cd ansible
           ansible-lint site.yml --profile=min || true
 
-  # ──────────────────────────────────────────────────────────
-  # JOB 2 : DEPLOY — Déploiement via Ansible
-  # ──────────────────────────────────────────────────────────
   deploy:
     name: "🚀 Deploy (Ansible Playbook)"
     runs-on: self-hosted
     needs: lint
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: >
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
+      github.event_name == 'push'
 
     steps:
 
@@ -70,8 +64,6 @@ jobs:
 
       - name: Test de connectivité SSH (ping Ansible)
         run: ansible all -i ansible/inventory.ini -m ping
-        env:
-          ANSIBLE_HOST_KEY_CHECKING: "False"
 
       - name: Exécuter le Playbook complet
         run: |
@@ -81,7 +73,6 @@ jobs:
             --diff \
             -v
         env:
-          ANSIBLE_HOST_KEY_CHECKING: "False"
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
 
       - name: Vérification post-déploiement — Nginx répond
