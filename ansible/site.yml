@@ -108,6 +108,27 @@
       ansible.builtin.iptables:
         chain: FORWARD
         policy: DROP
+    - name: Autoriser SSH depuis partout
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "22"
+        jump: ACCEPT
+
+    - name: Autoriser port 3306 depuis le Webserver uniquement
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "3306"
+        source: "{{ webserver_ip }}"
+        jump: ACCEPT
+
+    - name: Bloquer port 3306 depuis toute autre source
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "3306"
+        jump: DROP
 
     - name: Sauvegarder les règles iptables
       community.general.iptables_state:
