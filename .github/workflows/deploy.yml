@@ -3,10 +3,10 @@ name: CI/CD — Architecture 3-Tiers
 on:
   push:
     branches:
-      - main
+      - master
   pull_request:
     branches:
-      - main
+      - master
 
 # ────────────────────────────────────────────────────────────
 # Environnement global
