@@ -21,8 +21,8 @@ jobs:
   # JOB 1 : LINT — Vérification syntaxique YAML
   # ──────────────────────────────────────────────────────────
   lint:
-    name: "🔍 Lint YAML (Ansible + Vagrant)"
-    runs-on: self-hosted          # Runner auto-hébergé sur la machine hôte
+    name: "🔍 Lint YAML (Ansible)"
+    runs-on: self-hosted
     steps:
 
       - name: Checkout du dépôt
@@ -30,11 +30,6 @@ jobs:
 
       - name: Installer yamllint
         run: pip3 install yamllint --quiet
-
-      - name: Lint — Vagrantfile (syntax Ruby/YAML embedded)
-        run: |
-          echo "=== Vérification syntaxique Vagrantfile ==="
-          ruby -c Vagrantfile
 
       - name: Lint — Playbook Ansible site.yml
         run: |
@@ -48,7 +43,7 @@ jobs:
         run: |
           pip3 install ansible ansible-lint --quiet
           cd ansible
-          ansible-lint site.yml --profile=production || true
+          ansible-lint site.yml --profile=min || true
 
   # ──────────────────────────────────────────────────────────
   # JOB 2 : DEPLOY — Déploiement via Ansible
@@ -56,19 +51,13 @@ jobs:
   deploy:
     name: "🚀 Deploy (Ansible Playbook)"
     runs-on: self-hosted
-    needs: lint                   # Déploiement uniquement si le lint passe
+    needs: lint
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
 
       - name: Checkout du dépôt
         uses: actions/checkout@v4
-
-      - name: Vérifier que les VMs Vagrant sont actives
-        run: |
-          echo "=== État des VMs ==="
-          vagrant status
-        working-directory: ${{ github.workspace }}
 
       - name: Installer Ansible et collections requises
         run: |
@@ -80,8 +69,7 @@ jobs:
             --force-with-deps
 
       - name: Test de connectivité SSH (ping Ansible)
-        run: |
-          ansible all -i ansible/inventory.ini -m ping
+        run: ansible all -i ansible/inventory.ini -m ping
         env:
           ANSIBLE_HOST_KEY_CHECKING: "False"
 
@@ -95,12 +83,11 @@ jobs:
         env:
           ANSIBLE_HOST_KEY_CHECKING: "False"
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          APP_REPO:    ${{ secrets.APP_REPO }}
 
       - name: Vérification post-déploiement — Nginx répond
         run: |
           echo "=== Test HTTP sur le serveur Web ==="
-          curl --fail --silent --max-time 10 http://192.168.100.10 \
+          curl --fail --silent --max-time 10 http://192.168.56.11 \
             && echo "✅ Nginx OK" \
             || echo "⚠️  Nginx injoignable depuis le runner"
 

@@ -40,7 +40,29 @@
         out_interface: "{{ wan_iface }}"
         jump: MASQUERADE
 
-    - name: Autoriser forward DMZ → WAN
+    # ── Internet → DMZ (HTTP/HTTPS entrant) ──────────────────
+    - name: Autoriser Internet → DMZ port 80
+      ansible.builtin.iptables:
+        chain: FORWARD
+        in_interface: "{{ wan_iface }}"
+        out_interface: "{{ dmz_iface }}"
+        protocol: tcp
+        destination_port: "80"
+        ctstate: NEW,ESTABLISHED,RELATED
+        jump: ACCEPT
+
+    - name: Autoriser Internet → DMZ port 443
+      ansible.builtin.iptables:
+        chain: FORWARD
+        in_interface: "{{ wan_iface }}"
+        out_interface: "{{ dmz_iface }}"
+        protocol: tcp
+        destination_port: "443"
+        ctstate: NEW,ESTABLISHED,RELATED
+        jump: ACCEPT
+
+    # ── DMZ → Internet (npm, git, mises à jour) ──────────────
+    - name: Autoriser DMZ → Internet
       ansible.builtin.iptables:
         chain: FORWARD
         in_interface: "{{ dmz_iface }}"
@@ -48,7 +70,8 @@
         ctstate: NEW,ESTABLISHED,RELATED
         jump: ACCEPT
 
-    - name: Autoriser forward LAN → WAN
+    # ── LAN → Internet (mises à jour) ────────────────────────
+    - name: Autoriser LAN → Internet
       ansible.builtin.iptables:
         chain: FORWARD
         in_interface: "{{ lan_iface }}"
@@ -56,29 +79,35 @@
         ctstate: NEW,ESTABLISHED,RELATED
         jump: ACCEPT
 
-    - name: Autoriser retour WAN → DMZ/LAN
-      ansible.builtin.iptables:
-        chain: FORWARD
-        in_interface: "{{ wan_iface }}"
-        ctstate: ESTABLISHED,RELATED
-        jump: ACCEPT
-
-    - name: Autoriser DMZ → LAN (port 3306 MySQL uniquement)
-      ansible.builtin.iptables:
-        chain: FORWARD
-        in_interface: "{{ dmz_iface }}"
-        out_interface: "{{ lan_iface }}"
-        destination_port: "3306"
-        protocol: tcp
-        ctstate: NEW,ESTABLISHED,RELATED
-        jump: ACCEPT
-
-    - name: Bloquer tout autre trafic LAN → DMZ
+    # ── LAN → DMZ (DB peut accéder au Web) ───────────────────
+    - name: Autoriser LAN → DMZ
       ansible.builtin.iptables:
         chain: FORWARD
         in_interface: "{{ lan_iface }}"
         out_interface: "{{ dmz_iface }}"
+        ctstate: NEW,ESTABLISHED,RELATED
+        jump: ACCEPT
+
+    # ── Retour des connexions établies ────────────────────────
+    - name: Autoriser retour connexions établies
+      ansible.builtin.iptables:
+        chain: FORWARD
+        ctstate: ESTABLISHED,RELATED
+        jump: ACCEPT
+
+    # ── DMZ → LAN (INTERDIT) ─────────────────────────────────
+    - name: Bloquer DMZ → LAN
+      ansible.builtin.iptables:
+        chain: FORWARD
+        in_interface: "{{ dmz_iface }}"
+        out_interface: "{{ lan_iface }}"
         jump: DROP
+
+    # ── Politique par défaut ──────────────────────────────────
+    - name: Politique par défaut FORWARD → DROP
+      ansible.builtin.iptables:
+        chain: FORWARD
+        policy: DROP
 
     - name: Sauvegarder les règles iptables
       community.general.iptables_state:
@@ -86,29 +115,22 @@
         path: /etc/iptables/rules.v4
 
 # ── 2. Serveur Web (DMZ) ─────────────────────────────────────
-- name: Configure Web Server (Nginx + Node.js)
+- name: Configure Web Server (Nginx + Site Vitrine Tailwind/Vite)
   hosts: webservers
   become: true
   vars:
-    app_dir: /opt/app
-    app_repo: "{{ lookup('env', 'APP_REPO') | default('https://github.com/votre-org/votre-app.git', true) }}"
-    app_port: 3000
-    db_host: "192.168.10.10"
-    db_name: appdb
-    db_user: appuser
-    db_password: "{{ lookup('env', 'DB_PASSWORD') | default('ChangeMe123!', true) }}"
+    site_repo: "https://github.com/Falilou66/Portfolio-Engineer-Falilou.git"
+    site_dir: /var/www/site
   tasks:
 
-    - name: Installer Nginx
+    - name: Installer les paquets nécessaires
       apt:
-        name: nginx
+        name:
+          - nginx
+          - git
+          - curl
         state: present
         update_cache: true
-
-    - name: Installer curl (pour NodeSource)
-      apt:
-        name: curl
-        state: present
 
     - name: Ajouter le dépôt NodeSource (Node 20)
       shell: |
@@ -116,84 +138,65 @@
       args:
         creates: /etc/apt/sources.list.d/nodesource.list
 
-    - name: Installer Node.js et git
+    - name: Installer Node.js
       apt:
-        name:
-          - nodejs
-          - git
+        name: nodejs
         state: present
         update_cache: true
 
-    - name: Créer le répertoire de l'application
+    - name: Créer le répertoire du site
       file:
-        path: "{{ app_dir }}"
+        path: "{{ site_dir }}"
         state: directory
-        owner: www-data
-        group: www-data
+        owner: falilou
+        group: falilou
         mode: "0755"
 
-    - name: Cloner / mettre à jour le dépôt applicatif
+    - name: Cloner le dépôt du site vitrine
       git:
-        repo: "{{ app_repo }}"
-        dest: "{{ app_dir }}"
+        repo: "{{ site_repo }}"
+        dest: "{{ site_dir }}"
         version: main
         force: true
+      become_user: falilou
 
     - name: Installer les dépendances npm
-      community.general.npm:
-        path: "{{ app_dir }}"
-        state: present
-
-    - name: Créer le fichier .env de l'application
-      copy:
-        dest: "{{ app_dir }}/.env"
-        content: |
-          PORT={{ app_port }}
-          DB_HOST={{ db_host }}
-          DB_NAME={{ db_name }}
-          DB_USER={{ db_user }}
-          DB_PASSWORD={{ db_password }}
-        mode: "0600"
-        owner: www-data
-
-    - name: Installer pm2 globalement
-      community.general.npm:
-        name: pm2
-        global: true
-        state: present
-
-    - name: Démarrer l'application avec pm2
-      become_user: www-data
-      shell: |
-        pm2 describe app > /dev/null 2>&1 && pm2 restart app || pm2 start {{ app_dir }}/index.js --name app
+      shell: npm install
       args:
-        chdir: "{{ app_dir }}"
+        chdir: "{{ site_dir }}"
+      become_user: falilou
 
-    - name: Configurer Nginx en reverse proxy
+    - name: Builder le site avec Vite
+      shell: npm run build
+      args:
+        chdir: "{{ site_dir }}"
+      become_user: falilou
+
+    - name: Configurer Nginx pour servir le dossier dist/
       copy:
-        dest: /etc/nginx/sites-available/app
+        dest: /etc/nginx/sites-available/site
         content: |
           server {
               listen 80;
               server_name _;
+              root {{ site_dir }}/dist;
+              index index.html;
 
               location / {
-                  proxy_pass         http://127.0.0.1:{{ app_port }};
-                  proxy_http_version 1.1;
-                  proxy_set_header   Upgrade $http_upgrade;
-                  proxy_set_header   Connection 'upgrade';
-                  proxy_set_header   Host $host;
-                  proxy_cache_bypass $http_upgrade;
-                  proxy_set_header   X-Real-IP $remote_addr;
-                  proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+                  try_files $uri $uri/ /index.html;
+              }
+
+              location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ {
+                  expires 1y;
+                  add_header Cache-Control "public, immutable";
               }
           }
         mode: "0644"
 
     - name: Activer le site Nginx
       file:
-        src: /etc/nginx/sites-available/app
-        dest: /etc/nginx/sites-enabled/app
+        src: /etc/nginx/sites-available/site
+        dest: /etc/nginx/sites-enabled/site
         state: link
 
     - name: Désactiver le site default de Nginx
@@ -201,17 +204,15 @@
         path: /etc/nginx/sites-enabled/default
         state: absent
 
+    - name: Tester la configuration Nginx
+      shell: nginx -t
+      changed_when: false
+
     - name: Redémarrer et activer Nginx
       systemd:
         name: nginx
         state: restarted
         enabled: true
-
-    - name: Ouvrir le port 80 (ufw)
-      community.general.ufw:
-        rule: allow
-        port: "80"
-        proto: tcp
 
 # ── 3. Serveur Base de Données (LAN) ─────────────────────────
 - name: Configure Database Server (MySQL)
@@ -221,7 +222,8 @@
     db_name: appdb
     db_user: appuser
     db_password: "{{ lookup('env', 'DB_PASSWORD') | default('ChangeMe123!', true) }}"
-    webserver_ip: "192.168.100.10"
+    db_bind_address: "192.168.100.10"
+    webserver_ip: "192.168.10.10"
   tasks:
 
     - name: Installer MySQL et PyMySQL
@@ -238,11 +240,11 @@
         state: started
         enabled: true
 
-    - name: Configurer MySQL pour écouter sur le LAN
+    - name: Configurer MySQL pour écouter sur l'IP du DBserver
       lineinfile:
         path: /etc/mysql/mysql.conf.d/mysqld.cnf
         regexp: "^bind-address"
-        line: "bind-address = 192.168.10.10"
+        line: "bind-address = {{ db_bind_address }}"
       notify: Restart MySQL
 
     - name: Créer la base de données applicative
@@ -251,7 +253,7 @@
         state: present
         login_unix_socket: /var/run/mysqld/mysqld.sock
 
-    - name: Créer l'utilisateur applicatif (accès restreint au Web)
+    - name: Créer l'utilisateur applicatif (accès restreint au Webserver)
       community.mysql.mysql_user:
         name: "{{ db_user }}"
         password: "{{ db_password }}"
@@ -267,24 +269,12 @@
         state: absent
         login_unix_socket: /var/run/mysqld/mysqld.sock
 
-    - name: Désactiver le login root distant
-      community.mysql.mysql_user:
-        name: root
-        host: "{{ item }}"
-        state: absent
-        login_unix_socket: /var/run/mysqld/mysqld.sock
-      loop:
-        - "{{ ansible_hostname }}"
-        - "127.0.0.1"
-        - "::1"
-        - "%"
-
-    - name: Bloquer tout accès externe sauf port 3306 depuis la DMZ
+    - name: Autoriser port 3306 depuis le Webserver uniquement
       ansible.builtin.iptables:
         chain: INPUT
         protocol: tcp
         destination_port: "3306"
-        source: "192.168.100.0/24"
+        source: "{{ webserver_ip }}"
         jump: ACCEPT
 
     - name: Bloquer port 3306 depuis toute autre source

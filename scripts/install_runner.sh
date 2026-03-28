@@ -3,7 +3,7 @@
 # install_runner.sh — Installation du GitHub Actions Self-Hosted Runner
 # Usage : bash scripts/install_runner.sh <GITHUB_URL> <TOKEN>
 # Exemple :
-#   bash scripts/install_runner.sh https://github.com/mon-org/mon-repo ghp_XXXXX
+#   bash scripts/install_runner.sh https://github.com/mon-org/mon-repo AARTXXXXX
 # =============================================================
 set -euo pipefail
 
@@ -22,8 +22,8 @@ error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
 # ── Vérifications préalables ────────────────────────────────
 info "Vérification des prérequis..."
-command -v curl   >/dev/null || error "curl non trouvé"
-command -v tar    >/dev/null || error "tar non trouvé"
+command -v curl    >/dev/null || error "curl non trouvé"
+command -v tar     >/dev/null || error "tar non trouvé"
 command -v python3 >/dev/null || warn "python3 absent — Ansible en aura besoin"
 
 # ── Dépendances système ─────────────────────────────────────
@@ -32,14 +32,17 @@ sudo apt-get update -qq
 sudo apt-get install -y \
   curl tar libssl-dev libffi-dev \
   python3 python3-pip git \
-  ruby vagrant virtualbox \
-  ansible \
   2>/dev/null || warn "Certains paquets n'ont pas pu être installés"
 
-# Ansible collections
+# ── Ansible + outils CI ──────────────────────────────────────
+info "Installation de Ansible, yamllint, ansible-lint..."
 pip3 install --quiet ansible yamllint ansible-lint || true
+
+info "Installation des collections Ansible requises..."
 ansible-galaxy collection install \
-  ansible.posix community.general community.mysql \
+  ansible.posix \
+  community.general \
+  community.mysql \
   --force-with-deps --quiet || true
 
 # ── Téléchargement du Runner ─────────────────────────────────
@@ -51,7 +54,7 @@ ARCHIVE="actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
 DOWNLOAD_URL="https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${ARCHIVE}"
 
 if [[ -f "${ARCHIVE}" ]]; then
-  info "Archive déjà présente, vérification du checksum..."
+  info "Archive déjà présente, on continue..."
 else
   info "Téléchargement du runner v${RUNNER_VERSION}..."
   curl -fsSL -o "${ARCHIVE}" "${DOWNLOAD_URL}"
